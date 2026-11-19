@@ -145,8 +145,8 @@
       <div class="art"><img id="heroImg" alt="바다"></div>
       <div class="rest">
         <p class="hint">
-          화면을 <b>톡</b> 누르면 점프<br>
-          공중에서 한 번 더 누르면 <b>더블 점프</b><br>
+          <b>오른쪽 화면 톡</b> = 점프 · 한 번 더 톡 = 2단 점프<br>
+          <b>왼쪽 화면 꾹</b> = 슬라이드 (날아오는 장애물 피하기)<br>
           <i>악마 간식을 먹으면 꼬마 악마 피버!</i>
         </p>
         <button id="startBtn" class="primary">달리기 시작</button>
@@ -195,6 +195,33 @@ function irand(a, b){ return Math.floor(rand(a, b + 1)); }
 function lerp(a, b, t){ return a + (b - a) * t; }
 function pick(a){ return a[(Math.random() * a.length) | 0]; }
 function fmt(n){ return Math.round(n).toLocaleString('ko-KR'); }
+
+/* ---------- seamless parallax ------------------------------------------
+   배경의 모든 가로 반복 요소는 "슬롯"의 연속이다. 슬롯의 내용은 화면 좌표가
+   아니라 *전역 슬롯 번호*의 순수 해시로만 정해지므로, 한 슬롯은 태어나서
+   화면을 떠날 때까지 모양이 변하지 않는다. 스크롤 오프셋이 한 주기만큼
+   되감겨도 그림이 픽셀 단위로 같아서 경계에서 튀는 곳이 없다. */
+function h01(n){
+  var s = Math.sin(n * 127.1 + 311.7) * 43758.5453123;
+  return s - Math.floor(s);
+}
+function hR(n, salt, a, b){ return a + (b - a) * h01(n * 1.7 + salt * 13.31); }
+
+/* 슬롯 하나의 화면 x = (전역 번호 × 간격) - 누적 스크롤. 화면 양옆으로 한
+   슬롯씩 더 그려서 어떤 위치에서도 빈틈이 없다. */
+function eachSlot(spacing, factor, draw){
+  var D = world.dist * factor;
+  var n0 = Math.floor((D - spacing) / spacing) + 1;
+  var n1 = Math.ceil((D + W + spacing) / spacing);
+  for (var n = n0; n <= n1; n++) draw(n * spacing - D, n);
+}
+
+/* 배경 끊김 자동 검증용 기록 (테스트에서만 켠다) */
+var probeOn = false, probeBuf = [], probeFrames = [];
+function rec(layer, key, x, factor, sig){
+  if (!probeOn) return;
+  probeBuf.push([layer, key, Math.round(x * 100) / 100, factor, sig]);
+}
 
 /* ---------- canvas & layout ---------- */
 var canvas = document.getElementById('game');
@@ -269,12 +296,13 @@ function layout(){
   document.body.classList.toggle('short', H <= 420);
 
   if (LAND) {
-    sH = clamp(H * 0.215, 46, 260);
+    /* 0.215 → 0.183: 바다를 지금보다 15% 더 작게 */
+    sH = clamp(H * 0.183, 40, 230);
     groundY = Math.round(H * 0.845);
     horizonY = Math.round(H * 0.595);
   } else {
     /* portrait fallback: the side-view dog is wide, so size it from the width */
-    sH = clamp(Math.min(H * 0.215, W * 0.30), 58, 200);
+    sH = clamp(Math.min(H * 0.183, W * 0.255), 48, 178);
     groundY = Math.round(H * 0.78);
     horizonY = Math.round(H * 0.46);
   }
@@ -431,19 +459,20 @@ var world = {
   shake: 0,
   dist: 0,
   speed: 340,
-  spawnT: 1.3,
-  itemT: 2.4,
   devilT: 14,
   squash: 0,
   flash: 0,
   god: false,
   hint: 0,
+  magnet: 0,
+  slideAmt: 0,
+  beatDist: 0,
   prints: [],
   hitLog: [],
   objects: [],
   parts: [],
   pops: [],
-  player: { x: 90, y: 0, vy: 0, onGround: true, jumps: 0, dead: false }
+  player: { x: 90, y: 0, vy: 0, onGround: true, jumps: 0, dead: false, slide: false }
 };
 try { world.best = parseInt(localStorage.getItem('badaRunnerBest') || '0', 10) || 0; } catch(e){}
 
@@ -458,39 +487,47 @@ function resetGame(){
   world.shake = 0;
   world.dist = 0;
   world.speed = baseSpeed();
-  world.spawnT = 2.0;
-  world.itemT = 1.9;
   world.devilT = 12;
   world.squash = 0;
   world.flash = 0;
   world.hint = 4.5;
+  world.magnet = 0;
+  world.slideAmt = 0;
+  world.beatDist = world.dist + sH * 2.6;
   world.prints.length = 0;
   world.hitLog.length = 0;
   world.objects.length = 0;
   world.parts.length = 0;
   world.pops.length = 0;
   var p = world.player;
-  p.y = groundY; p.vy = 0; p.onGround = true; p.jumps = 0; p.dead = false;
+  p.y = groundY; p.vy = 0; p.onGround = true; p.jumps = 0; p.dead = false; p.slide = false;
   p.x = spawnX();
 }
 
-/* ---------- input ---------- */
-function press(){
-  Sound.unlock();
-  if (world.mode === 'ready') { startGame(); return; }
-  if (world.mode === 'over') { if (world.time > 0.6) startGame(); return; }
-  jump();
+/* ---------- input ----------
+   쿠키런식 두 손가락 체계: 화면 오른쪽 = 점프 / 2단 점프, 화면 왼쪽 = 꾹 누르면
+   슬라이드. 세로 잠금으로 스테이지를 90° 돌려 놓아도 포인터의 화면 좌표를
+   게임 좌표로 되돌려 판정하므로 좌/우가 절대 뒤집히지 않는다. */
+var slideHeld = false, slideHeldKey = false;
+var activePointers = {};
+
+function toGameX(clientX, clientY){
+  var r = canvas.getBoundingClientRect();
+  var dx = clientX - (r.left + r.width / 2);
+  var dy = clientY - (r.top + r.height / 2);
+  return ROT ? dy : dx;      /* 90° 시계 회전: 게임의 +x 는 화면의 +y */
 }
 
 function jump(){
   var p = world.player;
-  if (p.dead) return;
+  if (p.dead || world.mode !== 'playing') return;
   if (p.jumps < 2) {
     if (p.jumps === 0) {
       p.vy = -5.0 * sH;
       Sound.jump();
       dust(p.x, p.y, 6, 0.55);
       world.squash = -0.5;
+      p.slide = false;
     } else {
       p.vy = -4.4 * sH;
       Sound.dbljump();
@@ -502,22 +539,72 @@ function jump(){
   }
 }
 
-function onTap(e){
+function refreshSlideHold(){
+  var any = slideHeldKey;
+  for (var k in activePointers) if (activePointers[k] === 'slide') any = true;
+  slideHeld = any;
+}
+
+function onDown(e){
   if (e.target && e.target.closest && e.target.closest('button')) return;
   if (e.cancelable) e.preventDefault();
-  press();
+  Sound.unlock();
+  if (world.mode !== 'playing') {
+    if (world.mode === 'over' && world.time <= 0.6) return;
+    startGame();
+    return;
+  }
+  var left = toGameX(e.clientX, e.clientY) < 0;
+  if (e.pointerId !== undefined) activePointers[e.pointerId] = left ? 'slide' : 'jump';
+  if (left) { slideHeld = true; }
+  else jump();
 }
-window.addEventListener('pointerdown', onTap, { passive: false });
+
+function onUp(e){
+  if (e.pointerId !== undefined) delete activePointers[e.pointerId];
+  refreshSlideHold();
+}
+
+window.addEventListener('pointerdown', onDown, { passive: false });
+window.addEventListener('pointerup', onUp);
+window.addEventListener('pointercancel', onUp);
+window.addEventListener('blur', function(){
+  activePointers = {}; slideHeld = false; slideHeldKey = false;
+});
 if (!window.PointerEvent) {
-  window.addEventListener('touchstart', onTap, { passive: false });
-  window.addEventListener('mousedown', onTap, { passive: false });
+  window.addEventListener('touchstart', function(e){
+    if (!e.touches || !e.touches.length) return;
+    var t = e.changedTouches[0];
+    onDown({ pointerId: t.identifier, clientX: t.clientX, clientY: t.clientY,
+             target: e.target, cancelable: true, preventDefault: function(){} });
+  }, { passive: false });
+  window.addEventListener('touchend', function(e){
+    var t = e.changedTouches[0];
+    onUp({ pointerId: t.identifier });
+  });
+  window.addEventListener('touchcancel', function(e){
+    var t = e.changedTouches[0];
+    onUp({ pointerId: t.identifier });
+  });
+  window.addEventListener('mousedown', onDown, { passive: false });
+  window.addEventListener('mouseup', onUp);
 }
 
 window.addEventListener('keydown', function(e){
-  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.key === ' ') {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
     e.preventDefault();
-    press();
+    if (!e.repeat) {
+      if (world.mode === 'playing') jump();
+      else if (world.mode === 'ready' || (world.mode === 'over' && world.time > 0.6)) { Sound.unlock(); startGame(); }
+    }
   }
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+    e.preventDefault();
+    slideHeldKey = true; refreshSlideHold();
+  }
+});
+window.addEventListener('keyup', function(e){
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') { slideHeldKey = false; refreshSlideHold(); }
 });
 document.addEventListener('contextmenu', function(e){
   if (e.target && e.target.id === 'game') e.preventDefault();
@@ -562,64 +649,103 @@ function pop(x, y, text, color){
   world.pops.push({ x: x, y: y, text: text, c: color || '#3a3324', life: 0.85, max: 0.85, vy: -1.05 * sH });
 }
 
-/* ---------- spawning ---------- */
+/* ---------- spawning: 쿠키런식 "박자" ----------
+   일정 거리마다 한 마디(beat)를 놓는다. 한 마디 안에서 간식은 점프 포물선,
+   2단 점프 높은 아치, 슬라이드 일직선 중 하나로 규칙적으로 이어져서 몸이
+   저절로 점프/슬라이드를 하게 만든다. */
 function addItem(kind, x, y){
+  var s = kind === 'gold' ? 0.30 : kind === 'devil' ? 0.38 : kind === 'magnet' ? 0.34 : 0.29;
   world.objects.push({
     type: 'item', kind: kind, x: x, y: y,
-    w: sH * (kind === 'gold' ? 0.30 : kind === 'devil' ? 0.38 : 0.29),
-    h: sH * (kind === 'gold' ? 0.30 : kind === 'devil' ? 0.38 : 0.24),
+    w: sH * s,
+    h: sH * (kind === 'gold' ? 0.30 : kind === 'devil' ? 0.38 : kind === 'magnet' ? 0.34 : 0.24),
     seed: Math.random() * 100, dead: false
   });
 }
 
-function spawnObstacle(){
-  var t = world.time;
-  var kinds = ['puddle', 'leaf'];
-  if (t > 7) kinds.push('hydrant');
-  if (t > 15) kinds.push('bush');
-  if (t > 26) kinds.push('hydrant', 'bush');
-
-  var kind = pick(kinds);
-  var x = W + sH * 0.9;
-  var w, h;
+function spawnObs(kind, x, air){
+  var w, h, cy = 0;
   if (kind === 'puddle') { w = sH * (0.58 + rand(0, 0.2)); h = sH * 0.17; }
   else if (kind === 'leaf') { w = sH * 0.64; h = sH * 0.30; }
   else if (kind === 'hydrant') { w = sH * 0.38; h = sH * 0.50; }
-  else { w = sH * 0.74; h = sH * 0.52; }
+  else if (kind === 'bush') { w = sH * 0.74; h = sH * 0.52; }
+  else if (kind === 'crow') { w = sH * 0.64; h = sH * 0.34; cy = groundY - sH * rand(0.58, 0.65); air = true; }
+  else { w = sH * 0.56; h = sH * 0.30; cy = groundY - sH * rand(0.58, 0.65); air = true; }
+  var o = { type: 'obs', kind: kind, x: x, w: w, h: h, y: cy, air: !!air, seed: Math.random() * 100, dead: false };
+  world.objects.push(o);
+  return o;
+}
 
-  world.objects.push({ type: 'obs', kind: kind, x: x, w: w, h: h, seed: Math.random() * 100, dead: false });
-
-  if (t > 12 && Math.random() < 0.22) {
-    var gap = sH * (1.55 + Math.random() * 0.5);
-    var k2 = pick(['leaf', 'hydrant']);
-    world.objects.push({
-      type: 'obs', kind: k2, x: x + gap + w * 0.5,
-      w: k2 === 'leaf' ? sH * 0.6 : sH * 0.4,
-      h: k2 === 'leaf' ? sH * 0.28 : sH * 0.54,
-      seed: Math.random() * 100, dead: false
-    });
-  }
-
-  if (Math.random() < 0.72) {
-    var n = irand(1, 3);
-    var arcH = sH * rand(0.82, 1.2);
-    for (var i = 0; i < n; i++){
-      addItem('bone', x + (i - (n - 1) / 2) * sH * 0.5,
-        groundY - arcH - Math.sin((i / Math.max(1, n - 1)) * Math.PI) * sH * 0.26);
-    }
-    if (Math.random() < 0.16){
-      addItem('gold', x + rand(-sH * 0.4, sH * 0.4), groundY - arcH - sH * (0.5 + Math.random() * 0.35));
-    }
+/* 점프 포물선을 따라 늘어선 간식 */
+function arcItems(cx, span, hLow, hHigh, n){
+  for (var i = 0; i < n; i++){
+    var u = n === 1 ? 0.5 : i / (n - 1);
+    var hgt = hLow + Math.sin(u * Math.PI) * (hHigh - hLow);
+    addItem(hHigh > 2 && i === Math.floor(n / 2) ? 'gold' : 'bone',
+      cx - span / 2 + span * u, groundY - sH * hgt);
   }
 }
 
-function spawnItemRow(){
-  var y = groundY - sH * rand(0.72, 1.15);
-  var n = irand(2, 4);
-  var kind = Math.random() < 0.22 ? 'gold' : 'bone';
-  for (var i = 0; i < n; i++){
-    addItem(kind, W + sH * 0.9 + i * sH * 0.54, y - Math.sin(i / Math.max(1, n - 1) * Math.PI) * sH * 0.2);
+function spawnGroundBeat(x){
+  var t = world.time;
+  var kinds = ['puddle', 'leaf'];
+  if (t > 7) kinds.push('hydrant');
+  if (t > 14) kinds.push('bush');
+  if (t > 26) kinds.push('hydrant', 'bush');
+  var o = spawnObs(pick(kinds), x, false);
+  /* 한 번의 점프로 넘으며 먹는 포물선 아치 */
+  arcItems(x, o.w + sH * 1.9, 0.52, 1.18, 6);
+  if (Math.random() < 0.2) addItem('gold', x, groundY - sH * 1.55);
+  var extra = 0;
+  if (t > 13 && Math.random() < 0.36) {
+    var x2 = x + sH * (2.9 + Math.random() * 0.5);
+    spawnObs(pick(['puddle', 'leaf']), x2, false);
+    arcItems(x2, sH * 2.0, 0.50, 1.05, 4);
+    extra = sH * 0.9;
   }
+  /* 가끔 2단 점프로만 닿는 높은 아치 */
+  if (Math.random() < 0.22) arcItems(x + sH * 2.3, sH * 2.4, 1.35, 2.35, 5);
+  return extra;
+}
+
+function spawnAirBeat(x){
+  var kind = Math.random() < 0.55 ? 'crow' : 'drone';
+  var n = Math.random() < 0.42 ? 2 : 1;
+  var gap = sH * 2.15;
+  for (var i = 0; i < n; i++) spawnObs(kind, x + i * gap, true);
+  /* 날아오는 장애물 아래로 낮게 깔린 슬라이드 줄 */
+  var cnt = Math.round((n * gap + sH * 0.6) / (sH * 0.42));
+  for (var j = 0; j < cnt; j++){
+    addItem(j % 4 === 3 ? 'gold' : 'bone',
+      x - sH * 0.45 + j * sH * 0.42, groundY - sH * 0.40);
+  }
+  return n > 1 ? sH * 0.8 : 0;
+}
+
+function spawnRushBeat(x){
+  var n = irand(6, 9);
+  var shape = Math.random();
+  for (var i = 0; i < n; i++){
+    var u = i / (n - 1);
+    var hgt = shape < 0.34 ? (0.58 + u * 0.85)
+      : shape < 0.68 ? (1.45 - u * 0.85)
+      : (0.72 + Math.sin(u * Math.PI * 2) * 0.28);
+    addItem(i % 3 === 2 ? 'gold' : 'bone', x + i * sH * 0.46, groundY - sH * hgt);
+  }
+  if (Math.random() < 0.18) addItem('magnet', x + n * sH * 0.5 + sH * 0.4, groundY - sH * 1.0);
+  return 0;
+}
+
+function nextBeat(){
+  var t = clamp(world.time / 85, 0, 1);
+  return sH * lerp(5.4, 3.6, t);
+}
+
+function spawnBeat(x){
+  var t = world.time, r = Math.random();
+  if (t > 6 && r < 0.30) return spawnAirBeat(x);
+  if (r < 0.68) return spawnGroundBeat(x);
+  return spawnRushBeat(x);
 }
 
 /* ---------- flow ---------- */
@@ -681,8 +807,11 @@ function update(dt){
     if (world.comboT > 0) { world.comboT -= dt; if (world.comboT <= 0) world.combo = 0; }
     if (world.hint > 0) world.hint -= dt;
 
-    // physics
+    // physics (슬라이드를 꾹 누른 채 공중이면 급강하)
+    var held = slideHeld || slideHeldKey;
+    p.slide = p.onGround && held && !p.dead;
     var g = 11.6 * sH;
+    if (held && !p.onGround && p.vy > -sH * 0.45) g *= 2.2;
     if (!p.onGround) {
       p.vy += g * dt;
       p.y += p.vy * dt;
@@ -694,8 +823,9 @@ function update(dt){
     }
     world.squash *= Math.pow(0.0016, dt);
 
-    // running dust
+    // running dust / 슬라이드 먼지는 발밑에서 옆으로 흐른다
     if (p.onGround && Math.random() < dt * 14) dust(p.x - sH * 0.2, p.y, 1, 0.32);
+    if (p.slide && Math.random() < dt * 32) dust(p.x - sH * 0.36, groundY - sH * 0.02, 1, 0.64);
 
     // paw prints on the path
     if (Math.random() < dt * 4) {
@@ -708,17 +838,10 @@ function update(dt){
       if (pr.x < -sH * 0.3) world.prints.splice(pi, 1);
     }
 
-    // spawning
-    world.spawnT -= dt;
-    if (world.spawnT <= 0) {
-      spawnObstacle();
-      var baseGap = lerp(1.34, 0.74, clamp(world.time / 80, 0, 1));
-      var reaction = (W * 0.6) / world.speed;
-      world.spawnT = Math.max(baseGap, reaction) * rand(0.95, 1.2);
+    // spawning: 거리 기반 박자 — 어떤 속도에서도 마디 간격이 일정하다
+    if (world.dist >= world.beatDist) {
+      world.beatDist = world.dist + nextBeat() + spawnBeat(W + sH * 0.9);
     }
-
-    world.itemT -= dt;
-    if (world.itemT <= 0) { spawnItemRow(); world.itemT = rand(3.2, 5.6); }
 
     world.devilT -= dt;
     if (world.devilT <= 0 && world.fever <= 0) {
@@ -735,15 +858,35 @@ function update(dt){
       if (o.x < -sH * 2.2) o.dead = true;
     }
 
+    // 자석: 가까운 간식이 바다 쪽으로 빨려온다
+    if (world.magnet > 0) {
+      world.magnet -= dt;
+      var mr = sH * 3.6;
+      for (i = 0; i < world.objects.length; i++) {
+        o = world.objects[i];
+        if (o.type !== 'item' || o.dead || o.kind === 'devil') continue;
+        var mdx = (p.x + sH * 0.05) - o.x, mdy = (p.y - sH * 0.42) - o.y;
+        var md = Math.sqrt(mdx * mdx + mdy * mdy);
+        if (md < mr && md > 0.5) {
+          var pull = (1 - md / mr) * sH * 10 * dt;
+          o.x += mdx / md * pull;
+          o.y += mdy / md * pull;
+        }
+      }
+      if (world.magnet <= 0) { world.magnet = 0; burst(p.x, p.y - sH * 0.4, 8, ['#bfe6ff', '#8fd3ff']); }
+    }
+
     // collisions (side-view dog: body sits to the right of the anchor point)
-    var pb = { l: p.x - sH * 0.16, r: p.x + sH * 0.34, t: p.y - sH * 0.78, b: p.y - sH * 0.05 };
+    var pb = p.slide
+      ? { l: p.x - sH * 0.18, r: p.x + sH * 0.44, t: p.y - sH * 0.30, b: p.y - sH * 0.03 }
+      : { l: p.x - sH * 0.16, r: p.x + sH * 0.34, t: p.y - sH * 0.78, b: p.y - sH * 0.05 };
 
     for (i = 0; i < world.objects.length; i++) {
       o = world.objects[i];
       if (o.dead) continue;
 
       if (o.type === 'item') {
-        var reach = sH * 0.40 + Math.max(o.w, o.h) * 0.35;
+        var reach = sH * (world.magnet > 0 ? 0.62 : 0.40) + Math.max(o.w, o.h) * 0.35;
         if (Math.abs(o.x - p.x) < reach && o.y > pb.t - reach * 0.9 && o.y < pb.b + reach * 0.6) {
           collect(o);
         }
@@ -752,23 +895,32 @@ function update(dt){
 
       var hw2 = o.kind === 'puddle' ? 0.36 : 0.42;
       var ol = o.x - o.w * hw2, orr = o.x + o.w * hw2;
-      var ot = groundY - o.h, ob = groundY + sH * 0.03;
+      var ot, ob;
+      if (o.air) { ot = o.y - o.h * 0.42; ob = o.y + o.h * 0.42; }
+      else { ot = groundY - o.h; ob = groundY + sH * 0.03; }
       if (pb.r > ol && pb.l < orr && pb.b > ot && pb.t < ob) {
         if (world.fever > 0) smash(o);
         else if (world.invuln <= 0) hurt(o);
       }
     }
-    world.objects = world.objects.filter(function(x){ return !x.dead; });
+    var wkeep = 0;
+    for (i = 0; i < world.objects.length; i++) {
+      if (!world.objects[i].dead) world.objects[wkeep++] = world.objects[i];
+    }
+    world.objects.length = wkeep;
     updateParts(dt);
   } else {
     updateParts(dt);
     p.y = groundY;
+    p.slide = false;
     world.squash *= Math.pow(0.0016, dt);
     if (world.mode === 'over') world.time += dt;
   }
 
   if (world.shake > 0) world.shake = Math.max(0, world.shake - dt * 46);
   if (world.flash > 0) world.flash = Math.max(0, world.flash - dt * 2.4);
+  var slTarget = (world.mode === 'playing' && p.slide) ? 1 : 0;
+  world.slideAmt += (slTarget - world.slideAmt) * Math.min(1, dt * 18);
 }
 
 function updateParts(dt){
@@ -797,6 +949,14 @@ function comboMult(){ return Math.min(5, 1 + Math.floor(world.combo / 4)); }
 function collect(o){
   o.dead = true;
   if (o.kind === 'devil') { startFever(o.x, o.y); return; }
+  if (o.kind === 'magnet') {
+    world.magnet = 7;
+    world.score += 15;
+    Sound.golden();
+    burst(o.x, o.y, 16, ['#bfe6ff', '#8fd3ff', '#ffffff']);
+    pop(o.x, o.y - sH * 0.1, '자석!', '#2f6d9e');
+    return;
+  }
   world.combo++;
   world.comboT = 3.6;
   var mult = comboMult();
@@ -834,9 +994,12 @@ function smash(o){
   var colors = o.kind === 'puddle' ? ['#8fd3ff', '#c9ecff', '#5fa8d3']
     : o.kind === 'hydrant' ? ['#e8563f', '#f0a08a', '#c9c2b6']
     : o.kind === 'bush' ? ['#4f8a3d', '#7cb342', '#2f5e28']
+    : o.kind === 'crow' ? ['#3a3d48', '#6b6f7c', '#f2a13c']
+    : o.kind === 'drone' ? ['#dfe7ee', '#9aa7b3', '#ff6a4a']
     : ['#d98324', '#e8b04b', '#a85a1f'];
-  burst(o.x, groundY - o.h * 0.5, 15, colors);
-  pop(o.x, groundY - o.h - sH * 0.08, '+25', '#d63a22');
+  var by = o.air ? o.y : groundY - o.h * 0.5;
+  burst(o.x, by, 15, colors);
+  pop(o.x, by - sH * 0.18, '+25', '#d63a22');
 }
 
 function hurt(o){
@@ -919,12 +1082,15 @@ function drawSky(){
   ctx.fillStyle = 'rgba(255,253,238,0.95)';
   ctx.beginPath(); ctx.arc(sx, sy, sr * 0.6, 0, TAU); ctx.fill();
 
-  var cl = [[0.10, 0.10, 1.0], [0.40, 0.055, 0.7], [0.66, 0.13, 0.85], [0.9, 0.05, 0.6]];
-  var span = W + 280;
-  for (var i = 0; i < cl.length; i++) {
-    var bx = ((cl[i][0] * W - world.dist * 0.04 - i * 50) % span + span) % span - 140;
-    drawCloud(bx, H * cl[i][1], Math.min(W, H) * 0.10 * cl[i][2]);
-  }
+  /* 구름도 슬롯 반복: 한 구름은 자기 번호의 모양 그대로 화면을 가로질러
+     나가고 다음 구름이 오른쪽에서 들어온다 — 되감기는 지점이 없다. */
+  var cs = clamp(W * 0.36, 220, 460);
+  eachSlot(cs, 0.045, function(x, n){
+    var cr = Math.min(W, H) * hR(n, 3, 0.062, 0.115);
+    var cyy = H * hR(n, 5, 0.045, 0.165) + Math.sin(world.time * 0.25 + n) * 3;
+    rec('cloud', n, x, 0.045, cr);
+    drawCloud(x, cyy, cr);
+  });
 
   // kite
   var kt = (world.dist * 0.012 + W * 0.12) % (W + 260) - 130;
@@ -978,51 +1144,51 @@ function drawCloud(x, y, r){
 
 /* ---------- distance ---------- */
 function drawHills(){
-  drawHillLayer(horizonY + H * 0.012, H * 0.075, '#b6dfc0', 0.07, 560);
-  drawHillLayer(horizonY + H * 0.05, H * 0.055, '#9bd39c', 0.14, 400);
+  drawHillLayer(horizonY + H * 0.012, H * 0.075, '#b6dfc0', 0.07);
+  drawHillLayer(horizonY + H * 0.05, H * 0.055, '#9bd39c', 0.14);
 }
 
 function drawFar(){
   var base = groundY - sH * 0.02;
 
   // ---- back row of soft trees (atmospheric, light) ----
-  var bs = Math.max(170, sH * 1.35);
-  var bo = (world.dist * 0.18) % bs;
+  var bs = Math.max(150, sH * 1.3);
   ctx.save();
-  ctx.globalAlpha = 0.8;
-  for (var bx = -bo - bs; bx < W + bs * 2; bx += bs) {
-    var bi = Math.round((bx + bo) / bs);
-    drawFarTree(bx + (bi % 2) * bs * 0.4, base - sH * 0.04, sH * (1.0 + ((bi * 7) % 5) / 14), false);
-  }
+  ctx.globalAlpha = 0.82;
+  eachSlot(bs * 1.5, 0.18, function(x, n){
+    var th = sH * hR(n, 11, 0.85, 1.12);
+    var tx = x + bs * hR(n, 13, 0.10, 0.62);
+    rec('farBack', n, tx, 0.18, th);
+    drawFarTree(tx, base - sH * 0.04, th, false);
+  });
   ctx.restore();
 
   // ---- mid row: trees and lamp posts standing on the verge ----
-  var spacing = Math.max(260, sH * 2.15);
-  var off = (world.dist * 0.4) % spacing;
-  for (var x = -off - spacing; x < W + spacing * 2; x += spacing) {
-    var idx = Math.round((x + off) / spacing);
-    var fx = x + spacing * 0.4;
-    var deep = base - sH * (0.03 + (((idx * 5) % 3)) * 0.05);
-    if (((idx % 4) + 4) % 4 === 0) drawLamp(fx, base, sH * 0.95);
-    else if (((idx % 4) + 4) % 4 === 2) drawBushPatch(fx, base, sH * 0.5);
-    else drawFarTree(fx, deep, sH * (1.05 + ((idx * 11) % 5) / 16), true);
-  }
+  var spacing = Math.max(210, sH * 2.0);
+  eachSlot(spacing, 0.42, function(x, n){
+    var slot = ((n % 5) + 5) % 5;
+    var fx = x + spacing * hR(n, 17, 0.12, 0.58);
+    var deep = base - sH * hR(n, 19, 0.02, 0.09);
+    rec('farMid', n, fx, 0.42, slot);
+    if (slot === 0) drawLamp(fx, base, sH * 0.95);
+    else if (slot === 2) drawBushPatch(fx, base, sH * 0.5);
+    else drawFarTree(fx, deep, sH * hR(n, 23, 0.95, 1.20), true);
+  });
 
   // ---- hedge along the path edge (kept low so a smaller Bada still reads
   //      against the lighter trees behind it instead of the dark hedge) ----
-  var hs = Math.max(30, sH * 0.30);
-  var ho = (world.dist * 0.92) % hs;
-  for (var hx = -ho - hs; hx < W + hs; hx += hs) {
-    var hi = Math.round((hx + ho) / hs);
-    var hr = hs * (0.40 + ((hi * 13) % 7) / 20);
-    var hy = groundY - sH * 0.02;
+  var hs = Math.max(28, sH * 0.30);
+  var hy = groundY - sH * 0.02;
+  eachSlot(hs, 0.92, function(x, n){
+    var hr = hs * hR(n, 29, 0.34, 0.72);
+    rec('hedge', n, x, 0.92, hr);
     ctx.fillStyle = '#3a7439';
-    ctx.beginPath(); ctx.arc(hx, hy - hr * 0.55, hr, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, hy - hr * 0.55, hr, 0, TAU); ctx.fill();
     ctx.fillStyle = '#4b8b45';
-    ctx.beginPath(); ctx.arc(hx - hr * 0.18, hy - hr * 0.85, hr * 0.72, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x - hr * 0.18, hy - hr * 0.85, hr * 0.72, 0, TAU); ctx.fill();
     ctx.fillStyle = 'rgba(126,186,110,0.55)';
-    ctx.beginPath(); ctx.arc(hx - hr * 0.34, hy - hr * 1.05, hr * 0.3, 0, TAU); ctx.fill();
-  }
+    ctx.beginPath(); ctx.arc(x - hr * 0.34, hy - hr * 1.05, hr * 0.30, 0, TAU); ctx.fill();
+  });
 }
 
 function drawFarTree(x, baseY, h, dark){
@@ -1052,11 +1218,10 @@ function drawBushPatch(x, baseY, h){
   for (var i = 0; i < 3; i++){
     var bx = x + (i - 1) * h * 0.5;
     var r = h * (0.34 + (i % 2) * 0.1);
-    var g = ctx.createRadialGradient(bx - r * 0.3, baseY - h * 0.4 - r * 0.3, r * 0.15, bx, baseY - h * 0.4, r);
-    g.addColorStop(0, '#79bd6c');
-    g.addColorStop(1, '#428040');
-    ctx.fillStyle = g;
+    ctx.fillStyle = i === 1 ? '#4d9243' : '#428040';
     ctx.beginPath(); ctx.arc(bx, baseY - h * 0.4, r, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(121,189,108,0.75)';
+    ctx.beginPath(); ctx.arc(bx - r * 0.28, baseY - h * 0.4 - r * 0.42, r * 0.42, 0, TAU); ctx.fill();
   }
 }
 
@@ -1088,14 +1253,19 @@ function drawLamp(x, baseY, h){
   ctx.beginPath(); ctx.arc(x, baseY - h - lh2 * 1.25, lw2 * 0.72, 0, TAU); ctx.fill();
 }
 
-function drawHillLayer(baseY, amp, color, par, wave){
-  var off = (world.dist * par) % wave;
+function drawHillLayer(baseY, amp, color, par){
+  /* 파장을 화면 폭과 정확히 같게 두고 배음을 정수배만 쓰면, 오프셋이 한
+     주기 되감기는 순간에도 실루엣이 픽셀 단위로 같다. (예전 2.3배 배음은
+     주기의 약수·배수가 아니라서 되감길 때마다 능선이 튀었다.) */
+  var period = W;
+  var off = (world.dist * par) % period;
+  var step = Math.max(5, Math.round(W / 120));
   ctx.fillStyle = color;
   ctx.beginPath();
   ctx.moveTo(0, H);
-  for (var x = 0; x <= W + 8; x += 8) {
-    var t = (x + off) / wave * TAU;
-    var y = baseY - Math.sin(t) * amp - Math.sin(t * 2.3 + 1.1) * amp * 0.32;
+  for (var x = 0; x <= W + step; x += step) {
+    var t = (x + off) / period * TAU;
+    var y = baseY - Math.sin(t) * amp - Math.sin(t * 2 + 1.1) * amp * 0.32 - Math.sin(t * 3 + 0.4) * amp * 0.13;
     ctx.lineTo(x, y);
   }
   ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
@@ -1124,18 +1294,21 @@ function drawGrassField(){
   ctx.fillStyle = hz;
   ctx.fillRect(0, horizonY, W, H * 0.10);
 
-  // grass tufts in the verge
-  var gs = Math.max(46, sH * 0.4);
-  var go = (world.dist * 0.9) % gs;
+  // grass tufts in the verge — 한 번의 stroke로, 슬롯 번호로 모양 고정
+  var gs = Math.max(42, sH * 0.42);
+  var bands = 4;
   ctx.strokeStyle = 'rgba(46,110,52,0.22)';
   ctx.lineWidth = Math.max(1.5, sH * 0.012);
   ctx.beginPath();
-  for (var gy = horizonY + sH * 0.18; gy < groundY - 2; gy += sH * 0.2) {
-    for (var gx = -go + ((gy * 11) % gs); gx < W + gs; gx += gs) {
+  eachSlot(gs, 0.9, function(x, n){
+    for (var j = 0; j < bands; j++){
+      var gy = horizonY + sH * (0.17 + j * 0.185) + hR(n, j + 3, -0.03, 0.03) * sH;
+      var gx = x + hR(n, j + 7, -gs * 0.34, gs * 0.34);
+      rec('tuft', n * 10 + j, gx, 0.9, j);
       ctx.moveTo(gx, gy);
       ctx.quadraticCurveTo(gx + 3, gy - sH * 0.05, gx + 6, gy - sH * 0.08);
     }
-  }
+  });
   ctx.stroke();
 }
 
@@ -1156,27 +1329,25 @@ function drawPath(){
   ctx.fillRect(0, pathTop - sH * 0.05, W, sH * 0.018);
 
   // edge tufts
-  var es = Math.max(26, sH * 0.24);
-  var eo = (world.dist * 1.02) % es;
-  for (var ex = -eo; ex < W + es; ex += es) {
-    var ei = Math.round((ex + eo) / es);
-    var eh = sH * (0.07 + ((ei * 17) % 7) / 62);
-    ctx.strokeStyle = 'rgba(64,140,64,0.85)';
-    ctx.lineWidth = Math.max(1.6, sH * 0.014);
-    ctx.beginPath();
+  var es = Math.max(24, sH * 0.24);
+  ctx.strokeStyle = 'rgba(64,140,64,0.85)';
+  ctx.lineWidth = Math.max(1.6, sH * 0.014);
+  ctx.beginPath();
+  eachSlot(es, 1.02, function(ex, n){
+    var eh = sH * hR(n, 31, 0.06, 0.19);
+    rec('edgeTuft', n, ex, 1.02, eh);
     ctx.moveTo(ex, pathTop + 1);
     ctx.quadraticCurveTo(ex - 2, pathTop - eh * 0.7, ex - 5, pathTop - eh);
     ctx.moveTo(ex + 4, pathTop + 1);
     ctx.quadraticCurveTo(ex + 6, pathTop - eh * 0.6, ex + 10, pathTop - eh * 0.75);
-    ctx.stroke();
-  }
+  });
+  ctx.stroke();
 
-  // path texture: soft stones
-  var ps = Math.max(60, sH * 0.62);
-  var po = (world.dist * 1.0) % ps;
-  for (var px2 = -po; px2 < W + ps; px2 += ps) {
-    var n = Math.round((px2 + po) / ps);
-    var yy = groundY + sH * (0.18 + ((n * 13) % 9) / 26);
+  // path texture: soft stones (자갈도 슬롯 번호로만 모양이 정해진다)
+  var ps2 = Math.max(60, sH * 0.62);
+  eachSlot(ps2, 1.0, function(px2, n){
+    var yy = groundY + sH * hR(n, 37, 0.16, 0.50);
+    rec('stones', n, px2, 1.0, yy);
     ctx.fillStyle = 'rgba(255,248,228,0.34)';
     ctx.beginPath();
     ctx.ellipse(px2 + sH * 0.1, yy, sH * 0.055, sH * 0.016, 0, 0, TAU);
@@ -1185,23 +1356,22 @@ function drawPath(){
     ctx.beginPath();
     ctx.ellipse(px2 + sH * 0.32, yy + sH * 0.09, sH * 0.04, sH * 0.013, 0, 0, TAU);
     ctx.fill();
-  }
+  });
 
   // foreground grass
   var fgs = Math.max(30, sH * 0.26);
-  var fgo = (world.dist * 1.25) % fgs;
-  for (var gx2 = -fgo; gx2 < W + fgs; gx2 += fgs) {
-    var idx2 = Math.round((gx2 + fgo) / fgs);
-    var hh = sH * (0.1 + ((idx2 * 29) % 5) / 46);
-    ctx.strokeStyle = 'rgba(52,120,58,0.78)';
-    ctx.lineWidth = Math.max(2, sH * 0.018);
-    ctx.beginPath();
+  ctx.strokeStyle = 'rgba(52,120,58,0.78)';
+  ctx.lineWidth = Math.max(2, sH * 0.018);
+  ctx.beginPath();
+  eachSlot(fgs, 1.25, function(gx2, n){
+    var hh = sH * hR(n, 41, 0.09, 0.20);
+    rec('fgGrass', n, gx2, 1.25, hh);
     ctx.moveTo(gx2, H + 6);
     ctx.quadraticCurveTo(gx2 - 3, H - hh * 0.6, gx2 - 8, H - hh);
     ctx.moveTo(gx2 + 7, H + 6);
     ctx.quadraticCurveTo(gx2 + 10, H - hh * 0.55, gx2 + 16, H - hh * 0.8);
-    ctx.stroke();
-  }
+  });
+  ctx.stroke();
 }
 
 function drawPrints(){
@@ -1228,6 +1398,7 @@ function drawPrints(){
 /* ---------- obstacles ---------- */
 function drawObstacle(o){
   var x = o.x;
+  if (o.air) { drawAirObstacle(o); return; }
   if (o.kind === 'puddle') {
     var w = o.w, h = o.h;
     ctx.save();
@@ -1333,6 +1504,70 @@ function drawObstacle(o){
   ctx.restore();
 }
 
+function drawAirObstacle(o){
+  var x = o.x, y = o.y, w = o.w, h = o.h;
+  var flap = Math.sin(world.time * 15 + o.seed);
+  ctx.save();
+  ctx.fillStyle = 'rgba(70,60,40,0.13)';
+  ctx.beginPath(); ctx.ellipse(x, groundY + 2, w * 0.32, sH * 0.028, 0, 0, TAU); ctx.fill();
+
+  if (o.kind === 'crow') {
+    ctx.fillStyle = '#3a3d48';
+    ctx.beginPath();
+    ctx.ellipse(x - w * 0.04, y - h * 0.12 - flap * h * 0.26, w * 0.40, h * 0.19, -0.20 + flap * 0.1, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#2b2d36';
+    ctx.beginPath();
+    ctx.ellipse(x - w * 0.02, y + h * 0.13 + flap * h * 0.20, w * 0.34, h * 0.16, 0.18 - flap * 0.1, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#20222a';
+    ctx.beginPath(); ctx.ellipse(x, y, w * 0.30, h * 0.25, 0, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + w * 0.27, y - h * 0.11, w * 0.12, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#f2a13c';
+    ctx.beginPath();
+    ctx.moveTo(x + w * 0.36, y - h * 0.14);
+    ctx.lineTo(x + w * 0.50, y - h * 0.05);
+    ctx.lineTo(x + w * 0.36, y + h * 0.01);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(x + w * 0.30, y - h * 0.16, w * 0.032, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(x + w * 0.305, y - h * 0.16, w * 0.016, 0, TAU); ctx.fill();
+  } else {
+    var spin = Math.abs(Math.sin(world.time * 22 + o.seed));
+    ctx.strokeStyle = '#5a626b';
+    ctx.lineWidth = Math.max(2, sH * 0.02);
+    ctx.beginPath();
+    ctx.moveTo(x - w * 0.46, y - h * 0.20);
+    ctx.lineTo(x + w * 0.46, y - h * 0.20);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(205,224,238,0.62)';
+    for (var s = -1; s <= 1; s += 2){
+      ctx.beginPath();
+      ctx.ellipse(x + s * w * 0.44, y - h * 0.20, w * 0.20, h * 0.055 * (0.35 + spin * 0.65), 0, 0, TAU);
+      ctx.fill();
+    }
+    var dg = ctx.createLinearGradient(x, y - h * 0.20, x, y + h * 0.34);
+    dg.addColorStop(0, '#e3ebf2');
+    dg.addColorStop(1, '#93a0ab');
+    ctx.fillStyle = dg;
+    roundRect(x - w * 0.26, y - h * 0.16, w * 0.52, h * 0.42, h * 0.16); ctx.fill();
+    ctx.fillStyle = '#2f3944';
+    ctx.beginPath(); ctx.arc(x + w * 0.05, y + h * 0.02, h * 0.11, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255,86,64,' + (0.45 + spin * 0.5).toFixed(2) + ')';
+    ctx.beginPath(); ctx.arc(x - w * 0.15, y + h * 0.28, h * 0.07, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#6f7a85';
+    ctx.lineWidth = Math.max(1.5, sH * 0.014);
+    for (var l = -1; l <= 1; l += 2){
+      ctx.beginPath();
+      ctx.moveTo(x + l * w * 0.18, y + h * 0.24);
+      ctx.lineTo(x + l * w * 0.24, y + h * 0.38);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
 function roundRect(x, y, w, h, r){
   var rr = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
@@ -1418,6 +1653,35 @@ function drawItem(o){
     return;
   }
 
+  // magnet treat: 7초 동안 간식을 빨아들인다
+  if (o.kind === 'magnet') {
+    ctx.save();
+    ctx.translate(x, y);
+    var mg = o.w * 0.5;
+    var aura2 = 0.30 + Math.sin(world.time * 5 + o.seed) * 0.08;
+    var gl2 = ctx.createRadialGradient(0, 0, mg * 0.2, 0, 0, mg * 2.0);
+    gl2.addColorStop(0, 'rgba(140,215,255,' + aura2.toFixed(2) + ')');
+    gl2.addColorStop(1, 'rgba(90,170,255,0)');
+    ctx.fillStyle = gl2;
+    ctx.beginPath(); ctx.arc(0, 0, mg * 2.0, 0, TAU); ctx.fill();
+    ctx.strokeStyle = '#d94a3d';
+    ctx.lineWidth = Math.max(4, mg * 0.30);
+    ctx.beginPath(); ctx.arc(0, mg * 0.02, mg * 0.62, Math.PI, TAU); ctx.stroke();
+    ctx.lineWidth = Math.max(3, mg * 0.28);
+    ctx.beginPath();
+    ctx.moveTo(-mg * 0.62, mg * 0.02); ctx.lineTo(-mg * 0.62, mg * 0.52);
+    ctx.moveTo(mg * 0.62, mg * 0.02); ctx.lineTo(mg * 0.62, mg * 0.52);
+    ctx.stroke();
+    ctx.strokeStyle = '#dfe7ee';
+    ctx.lineWidth = Math.max(3, mg * 0.24);
+    ctx.beginPath();
+    ctx.moveTo(-mg * 0.62, mg * 0.44); ctx.lineTo(-mg * 0.62, mg * 0.56);
+    ctx.moveTo(mg * 0.62, mg * 0.44); ctx.lineTo(mg * 0.62, mg * 0.56);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
   // devil trident treat
   ctx.save();
   ctx.translate(x, y);
@@ -1454,6 +1718,7 @@ function drawItem(o){
 /* ---------- player ---------- */
 /* every sprite is sized from its measured body box: the tallest normal frame is
    exactly sH tall, the tallest little-devil frame exactly sH × 1.2 */
+var lastDraw = null;
 function playerSet(){
   var p = world.player;
   if (world.fever > 0) {
@@ -1467,11 +1732,13 @@ function playerSet(){
 function drawPlayer(){
   var p = world.player;
   var alt = groundY - p.y;
+  var sl0 = world.slideAmt;
 
   var fade = clamp(1 - alt / (sH * 2.1), 0, 1);
   ctx.fillStyle = 'rgba(105,80,40,' + (0.22 * fade + 0.02).toFixed(3) + ')';
   ctx.beginPath();
-  ctx.ellipse(p.x + sH * 0.03, groundY + sH * 0.014, sH * 0.44 * (0.62 + fade * 0.38), sH * 0.075, 0, 0, TAU);
+  ctx.ellipse(p.x + sH * 0.03, groundY + sH * 0.014,
+    sH * 0.44 * (0.62 + fade * 0.38) * (1 + 0.26 * sl0), sH * 0.075 * (1 - 0.25 * sl0), 0, 0, TAU);
   ctx.fill();
 
   var set = playerSet();
@@ -1489,8 +1756,10 @@ function drawPlayer(){
   }
 
   /* gallop cycle: one stride every ~0.3 body heights of travel */
+  var sl = world.slideAmt;
   var phase = world.dist / (sH * 0.30 * set.rate);
   var fi = n > 1 ? (Math.floor(phase) % n) : 0;
+  if (sl > 0.35) fi = 0;          /* 슬라이드는 달리기 프레임을 납작하게 눌러 쓴다 */
   var img = frames[fi], pose = poses[fi];
 
   var k = set.fever ? (sH * FEVER_SCALE / REF_DEVIL_BODY_H) : (sH / REF_BODY_H);
@@ -1498,13 +1767,15 @@ function drawPlayer(){
   var dx = -pose.cx * k, dy = -pose.by * k;   // body centre at p.x, paws on the ground line
   var bodyH = pose.bh * k;
 
-  var bob = p.onGround ? Math.abs(Math.sin(phase * Math.PI)) * sH * 0.012 : 0;
+  var bob = (p.onGround && sl < 0.5) ? Math.abs(Math.sin(phase * Math.PI)) * sH * 0.012 : 0;
   var tilt = p.onGround
     ? Math.sin(phase * Math.PI) * 0.018
     : clamp(p.vy / (sH * 11), -0.16, 0.20);
+  tilt += 0.085 * sl;                                  /* 엎드리며 코가 살짝 내려간다 */
   var sq = world.squash;
-  var sx = 1 + sq * 0.26, sy = 1 - sq * 0.26;
-  var cy = -bodyH * 0.45;   // body centre, measured up from the feet line
+  var sx = (1 + sq * 0.26) * (1 + 0.22 * sl);
+  var sy = (1 - sq * 0.26) * (1 - 0.46 * sl);
+  var cy = -bodyH * 0.45 * (1 - 0.34 * sl);   // body centre, measured up from the feet line
 
   var glow = ctx.createRadialGradient(p.x, p.y + cy, bodyH * 0.2, p.x, p.y + cy, bodyH * 0.95);
   glow.addColorStop(0, 'rgba(255,250,225,0.13)');
@@ -1523,6 +1794,13 @@ function drawPlayer(){
     ctx.beginPath(); ctx.arc(p.x, p.y + cy, hh, 0, TAU); ctx.fill();
   }
 
+  if (world.magnet > 0) {
+    var mA = 0.32 + Math.sin(world.time * 8) * 0.08;
+    ctx.strokeStyle = 'rgba(120,200,255,' + mA.toFixed(2) + ')';
+    ctx.lineWidth = Math.max(2, sH * 0.016);
+    ctx.beginPath(); ctx.arc(p.x, p.y + cy, bodyH * 0.88, 0, TAU); ctx.stroke();
+  }
+
   ctx.save();
   if (world.invuln > 0 && Math.floor(world.invuln * 12) % 2 === 0) ctx.globalAlpha = 0.45;
   if (p.dead) ctx.globalAlpha = 0.9;
@@ -1531,6 +1809,8 @@ function drawPlayer(){
   ctx.scale(sx, sy);
   ctx.drawImage(img, dx, dy - cy, dw, dh);
   ctx.restore();
+  lastDraw = { kind: set.fever ? 'fever' : (sl > 0.5 ? 'slide' : (p.onGround ? 'run' : 'jump')),
+    bodyH: bodyH, h: dh, w: dw, sx: sx, sy: sy };
 }
 
 /* ---------- particles ---------- */
@@ -1636,19 +1916,32 @@ function drawHud(){
     drawHeart(hx - i * (hs * 1.32), hy, hs * 0.48, i < world.lives);
   }
 
-  // first-run hint
-  if (world.mode === 'playing' && world.hint > 0 && world.player.onGround) {
-    ctx.globalAlpha = clamp(world.hint / 1.1, 0, 1) * 0.92;
+  // first-run hint: 두 조작을 한 줄로 + 좌/우 구역 라벨
+  if (world.mode === 'playing' && world.hint > 0) {
+    var hA = clamp(world.hint / 1.2, 0, 1) * 0.92;
+    ctx.globalAlpha = hA;
     ctx.textAlign = 'center';
-    ctx.font = '800 ' + Math.round(clamp(unit * 0.042, 12, 17)) + 'px -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif';
-    var txt = '톡 = 점프 · 한 번 더 = 더블 점프';
+    ctx.font = '800 ' + Math.round(clamp(unit * 0.040, 11, 16)) + 'px -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif';
+    var txt = '오른쪽 톡 = 점프 · 두 번 톡 = 2단 점프        왼쪽 꾹 = 슬라이드';
     var tw = ctx.measureText(txt).width;
-    var hy2 = Math.max(H * 0.30, SAFE.t + 66);
-    ctx.fillStyle = 'rgba(255,252,240,0.88)';
-    roundRect(W / 2 - tw / 2 - 13, hy2 - 17, tw + 26, 32, 16);
+    var hy2 = Math.max(H * 0.26, SAFE.t + 58);
+    ctx.fillStyle = 'rgba(255,252,240,0.90)';
+    roundRect(W / 2 - tw / 2 - 14, hy2 - 17, tw + 28, 33, 16);
     ctx.fill();
     ctx.fillStyle = '#6b5f42';
     ctx.fillText(txt, W / 2, hy2 + 5);
+
+    var zA = clamp((world.hint - 1.2) / 1.2, 0, 1) * 0.45;
+    if (zA > 0.01) {
+      var zy = H - Math.max(10, H * 0.05);
+      ctx.globalAlpha = zA;
+      ctx.font = '900 ' + Math.round(clamp(unit * 0.036, 10, 15)) + 'px -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif';
+      ctx.fillStyle = '#7a5326';
+      ctx.textAlign = 'left';
+      ctx.fillText('◀ 왼쪽 꾹: 슬라이드', Math.max(14, W * 0.035), zy);
+      ctx.textAlign = 'right';
+      ctx.fillText('점프 · 2단 점프 ▶', W - Math.max(14, W * 0.035), zy);
+    }
     ctx.globalAlpha = 1;
     ctx.textAlign = 'left';
   }
@@ -1696,13 +1989,25 @@ function drawVignette(){
 }
 
 /* ---------- loop ---------- */
-var last = 0;
+var last = 0, fps = 60, fpsN = 0, fpsT = 0;
 function frame(ts){
   if (!last) last = ts;
-  var dt = Math.min(0.05, (ts - last) / 1000);
+  var dt = (ts - last) / 1000;
   last = ts;
-  update(dt);
+  if (!(dt > 0)) dt = 0;
+  if (dt > 0.05) dt = 0.05;          /* 탭 전환·프레임 스파이크 클램핑 */
+  /* 긴 프레임이 와도 물리를 1/120초 단위로 나눠 돌려 장애물을 통과하지 않는다 */
+  var steps = Math.max(1, Math.ceil(dt / (1 / 120)));
+  var sdt = dt / steps;
+  for (var s = 0; s < steps; s++) update(sdt);
   render();
+  if (probeOn) {
+    probeFrames.push({ d: world.dist, t: probeBuf.slice(0) });
+    probeBuf.length = 0;
+    if (probeFrames.length > 1500) probeFrames.shift();
+  }
+  fpsN++;
+  if (ts - fpsT > 500) { fps = Math.round(fpsN * 1000 / (ts - fpsT)); fpsN = 0; fpsT = ts; }
   requestAnimationFrame(frame);
 }
 
@@ -1726,11 +2031,22 @@ window.__bada = {
   world: world,
   startFever: startFever,
   addItem: addItem,
+  addObs: spawnObs,
   jump: jump,
   start: startGame,
   layout: layout,
   sprites: sprites,
-  pose: POSE
+  pose: POSE,
+  state: function(){
+    return { W: W, H: H, sH: sH, groundY: groundY, horizonY: horizonY, rot: ROT, dpr: DPR,
+      fps: fps, slide: world.player.slide, slideAmt: world.slideAmt,
+      py: world.player.y, vy: world.player.vy, onGround: world.player.onGround,
+      jumps: world.player.jumps, lives: world.lives, mode: world.mode, dist: world.dist,
+      fever: world.fever, magnet: world.magnet, draw: lastDraw };
+  },
+  probeStart: function(){ probeFrames.length = 0; probeOn = true; return true; },
+  probeStop: function(){ probeOn = false; return probeFrames.length; },
+  probeFrames: function(){ return probeFrames; }
 };
 
 /* ---------- boot ---------- */
