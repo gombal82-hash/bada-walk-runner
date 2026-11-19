@@ -729,7 +729,11 @@ function onDown(e){
   Sound.unlock();
   if (world.mode !== 'playing') {
     if (world.mode === 'clear') return;
-    if (world.mode === 'over' && world.time <= 0.6) return;
+    if (world.mode === 'over') {
+      if (world.time <= 0.6) return;
+      startStage(world.stage, world.endless, world.stageBase);
+      return;
+    }
     startGame();
     return;
   }
@@ -774,7 +778,8 @@ window.addEventListener('keydown', function(e){
     e.preventDefault();
     if (!e.repeat) {
       if (world.mode === 'playing') jump();
-      else if (world.mode === 'ready' || (world.mode === 'over' && world.time > 0.6)) { Sound.unlock(); startGame(); }
+      else if (world.mode === 'ready') { Sound.unlock(); startGame(); }
+      else if (world.mode === 'over' && world.time > 0.6) { Sound.unlock(); startStage(world.stage, world.endless, world.stageBase); }
     }
   }
   if (e.code === 'ArrowDown' || e.code === 'KeyS') {
