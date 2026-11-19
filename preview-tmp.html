@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>바다 러너 라이브 확인</title>
+<style>html,body{margin:0;padding:0;background:#12151b;}iframe{border:0;display:block;}</style>
+</head>
+<body>
+<script>
+var SIZES = { L844: [844, 390], L932: [932, 430], L667: [667, 375], P390: [390, 844], P320: [320, 568], D1280: [1280, 720] };
+var parts = (location.hash || '').replace('#', '').split(':');
+var size = SIZES[parts[0]] || SIZES.L844;
+var f = document.createElement('iframe');
+f.id = 'f';
+f.width = size[0]; f.height = size[1];
+f.style.width = size[0] + 'px'; f.style.height = size[1] + 'px';
+f.src = './index.html';
+document.body.appendChild(f);
+</script>
+</body>
+</html>
