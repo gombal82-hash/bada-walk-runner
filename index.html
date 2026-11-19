@@ -210,6 +210,8 @@ function readSafeAreas(){
   SAFE.l = parseFloat(cs.paddingLeft) || 0;
 }
 
+function spawnX(){ return Math.round(clamp(W * (LAND ? 0.215 : 0.245), sH * 0.95, W * 0.42)); }
+
 function layout(){
   var vv = window.visualViewport;
   W = Math.max(280, Math.round(vv && vv.width ? vv.width : window.innerWidth));
@@ -239,7 +241,7 @@ function layout(){
   world.speed = baseSpeed();
 
   var p = world.player;
-  p.x = Math.round(clamp(W * (LAND ? 0.215 : 0.245), sH * 0.95, W * 0.42));
+  p.x = spawnX();
   if (p.onGround) p.y = groundY;
 }
 window.addEventListener('resize', layout);
@@ -429,7 +431,7 @@ function resetGame(){
   world.pops.length = 0;
   var p = world.player;
   p.y = groundY; p.vy = 0; p.onGround = true; p.jumps = 0; p.dead = false;
-  p.x = Math.max(W * 0.225, 76);
+  p.x = spawnX();
 }
 
 /* ---------- input ---------- */
