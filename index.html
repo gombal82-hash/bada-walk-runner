@@ -1407,15 +1407,20 @@ function drawItem(o){
 }
 
 /* ---------- player ---------- */
+/* the devil art carries its trident inside the frame, so its measured body box
+   is a little short of the real body: draw that set slightly larger so the
+   transformation does not shrink Bada */
+var K_ADJ = { run: 1, devil: 1.28 };
+
 function playerSet(){
   var p = world.player;
   var fever = world.fever > 0;
   if (fever) {
-    if (!p.onGround && sprites.devilJump && POSE.devilJump) return { frames: [sprites.devilJump], poses: [POSE.devilJump], rate: 1 };
-    return { frames: sprites.devil, poses: POSE.devil, rate: 1.15 };
+    if (!p.onGround && sprites.devilJump && POSE.devilJump) return { frames: [sprites.devilJump], poses: [POSE.devilJump], rate: 1.15, k: K_ADJ.devil };
+    return { frames: sprites.devil, poses: POSE.devil, rate: 1.15, k: K_ADJ.devil };
   }
-  if (!p.onGround && sprites.jump) return { frames: [sprites.jump], poses: [POSE.jump], rate: 1 };
-  return { frames: sprites.run, poses: POSE.run, rate: 1 };
+  if (!p.onGround && sprites.jump) return { frames: [sprites.jump], poses: [POSE.jump], rate: 1, k: K_ADJ.run };
+  return { frames: sprites.run, poses: POSE.run, rate: 1, k: K_ADJ.run };
 }
 
 function drawPlayer(){
@@ -1447,7 +1452,7 @@ function drawPlayer(){
   var fi = n > 1 ? (Math.floor(phase) % n) : 0;
   var img = frames[fi], pose = poses[fi];
 
-  var k = sH / REF_BODY_H;
+  var k = (sH / REF_BODY_H) * (set.k || 1);
   var dw = pose.w * k, dh = pose.h * k;
   var dx = -pose.cx * k, dy = -pose.by * k;   // body centre at p.x, paws on the ground line
   var bodyH = pose.bh * k;
