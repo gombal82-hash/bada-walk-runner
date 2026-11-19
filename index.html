@@ -1774,7 +1774,7 @@ function drawPlayer(){
   tilt += 0.085 * sl;                                  /* 엎드리며 코가 살짝 내려간다 */
   var sq = world.squash;
   var sx = (1 + sq * 0.26) * (1 + 0.22 * sl);
-  var sy = (1 - sq * 0.26) * (1 - 0.46 * sl);
+  var sy = (1 - sq * 0.26) * (1 - 0.50 * sl);
   var cy = -bodyH * 0.45 * (1 - 0.34 * sl);   // body centre, measured up from the feet line
 
   var glow = ctx.createRadialGradient(p.x, p.y + cy, bodyH * 0.2, p.x, p.y + cy, bodyH * 0.95);
@@ -1804,7 +1804,7 @@ function drawPlayer(){
   ctx.save();
   if (world.invuln > 0 && Math.floor(world.invuln * 12) % 2 === 0) ctx.globalAlpha = 0.45;
   if (p.dead) ctx.globalAlpha = 0.9;
-  ctx.translate(p.x, p.y + cy - bob);
+  ctx.translate(p.x, p.y + cy * sy - bob);
   ctx.rotate(tilt);
   ctx.scale(sx, sy);
   ctx.drawImage(img, dx, dy - cy, dw, dh);
