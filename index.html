@@ -1008,12 +1008,13 @@ function drawFar(){
     else drawFarTree(fx, deep, sH * (1.05 + ((idx * 11) % 5) / 16), true);
   }
 
-  // ---- hedge along the path edge ----
-  var hs = Math.max(46, sH * 0.36);
+  // ---- hedge along the path edge (kept low so a smaller Bada still reads
+  //      against the lighter trees behind it instead of the dark hedge) ----
+  var hs = Math.max(30, sH * 0.30);
   var ho = (world.dist * 0.92) % hs;
   for (var hx = -ho - hs; hx < W + hs; hx += hs) {
     var hi = Math.round((hx + ho) / hs);
-    var hr = hs * (0.42 + ((hi * 13) % 7) / 18);
+    var hr = hs * (0.40 + ((hi * 13) % 7) / 20);
     var hy = groundY - sH * 0.02;
     ctx.fillStyle = '#3a7439';
     ctx.beginPath(); ctx.arc(hx, hy - hr * 0.55, hr, 0, TAU); ctx.fill();
