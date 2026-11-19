@@ -2143,7 +2143,23 @@ loadSprites(function(){
       await wait(280);
       R.fastFall = {airY: Math.round(airY), after: Math.round(b.state().py), onGround: b.state().onGround};
       ev('pointerup', 'left');
-      await wait(300);
+      await wait(600);
+
+      // 급강하: 체공 시간 비교 (왼쪽 꾹 없이 vs 있이)
+      async function airTime(hold){
+        b.start(); w = b.world; w.god = true; w.objects.length = 0;
+        await wait(120);
+        tap('right');
+        if (hold) ev('pointerdown', 'left');
+        var t0 = w.time, n = 0;
+        while (!b.state().onGround && n < 200) { await wait(20); n++; }
+        var dtAir = w.time - t0;
+        if (hold) { ev('pointerup', 'left'); }
+        await wait(150);
+        return +dtAir.toFixed(2);
+      }
+      R.airNoHold = await airTime(false);
+      R.airHold = await airTime(true);
 
       b.start(); w = b.world; w.god = false; w.invuln = 0; w.fever = 0; w.lives = 3; w.objects.length = 0;
       await wait(200);
@@ -2166,15 +2182,17 @@ loadSprites(function(){
 
       b.start(); w = b.world; w.god = true; w.objects.length = 0;
       await wait(600);
-      var n0 = b.state(); await wait(700); var n1 = b.state();
+      var n0 = {t: w.time, d: w.dist}; await wait(700); var n1 = {t: w.time, d: w.dist};
+      var nDraw = b.state().draw;
       b.startFever(200, 200);
       await wait(120);
-      var f0 = b.state(); await wait(700); var f1 = b.state();
-      R.fever = {baseRate: +(n1.dist - n0.dist).toFixed(1), feverRate: +(f1.dist - f0.dist).toFixed(1),
-        ratio: +((f1.dist - f0.dist) / Math.max(1e-6, n1.dist - n0.dist)).toFixed(3),
-        bodyH: f0.draw ? Math.round(f0.draw.bodyH) : null, sH: Math.round(f0.sH),
-        kind: f0.draw && f0.draw.kind, bodyNormal: n1.draw ? Math.round(n1.draw.bodyH) : null,
-        kindNormal: n1.draw && n1.draw.kind};
+      var f0 = {t: w.time, d: w.dist}; await wait(700); var f1 = {t: w.time, d: w.dist};
+      var nRate = (n1.d - n0.d) / Math.max(1e-6, n1.t - n0.t);
+      var fRate = (f1.d - f0.d) / Math.max(1e-6, f1.t - f0.t);
+      R.fever = {baseRate: +nRate.toFixed(1), feverRate: +fRate.toFixed(1), ratio: +(fRate / nRate).toFixed(3),
+        bodyH: b.state().draw ? Math.round(b.state().draw.bodyH) : null, sH: Math.round(b.state().sH),
+        kindFever: b.state().draw && b.state().draw.kind,
+        bodyNormal: nDraw ? Math.round(nDraw.bodyH) : null, kindNormal: nDraw && nDraw.kind};
 
       b.start(); w = b.world; w.god = true; w.objects.length = 0;
       await wait(200);
