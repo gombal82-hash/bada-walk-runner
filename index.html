@@ -2044,6 +2044,7 @@ window.__bada = {
       jumps: world.player.jumps, lives: world.lives, mode: world.mode, dist: world.dist,
       fever: world.fever, magnet: world.magnet, draw: lastDraw };
   },
+  zoneOf: function(x, y){ return toGameX(x, y) < 0 ? 'left' : 'right'; },
   probeStart: function(){ probeFrames.length = 0; probeOn = true; return true; },
   probeStop: function(){ probeOn = false; return probeFrames.length; },
   probeFrames: function(){ return probeFrames; }
